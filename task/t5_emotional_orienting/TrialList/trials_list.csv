@@ -1,0 +1,11 @@
+轮次,图片路径,情绪类型,间隔时长（s）,情绪图片时长（s）,空白屏时长（s）
+1,N/N096.bmp,neutral,4,11,2
+2,P/P025.bmp,positive,3,12,2
+3,A/A085.bmp,negative,5,10,2
+4,复杂细节/复杂细节1.png,complex,4,11,2
+5,N/N085.bmp,neutral,3,12,2
+6,A/A019.bmp,negative,5,10,2
+7,P/P014.bmp,positive,4,11,2
+8,复杂细节/复杂细节2.png,complex,3,12,2
+9,N/N022.bmp,neutral,5,10,2
+10,A/A075.bmp,negative,4,11,2

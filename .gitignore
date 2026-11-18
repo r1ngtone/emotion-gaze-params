@@ -1,0 +1,24 @@
+# macOS
+._*
+.DS_Store
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# 隐私红线：真实被试数据（永不入库）
+**/data/
+**/示例数据/
+**/log_et/
+**/TEST_*/
+**/eyetrack.csv
+**/trial_image_records.csv
+
+# 版权材料：刺激图片与字体（本仓库不公开）
+**/images/
+**/fonts/
+
+# Windows 元数据
+Thumbs.db
