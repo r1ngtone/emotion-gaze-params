@@ -1,18 +1,10 @@
+"""Unchanged T6 analysis functions; private example main excluded.
+Used by the explicit-input fitting and time-block scoring entry points.
+"""
 import ast
-import sys
-from datetime import datetime
-from pathlib import Path
-
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
-
-ROOT_DIR = Path(__file__).resolve().parents[1]
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from corecode.clean_t5_t6_exports import prepare_clean_raw_data
-from devide_rule.classify_subject import classify, load_thresholds
 
 DEFAULT_INIT_PARAMS = {
     "Tmax1": 1000.0,
@@ -35,10 +27,19 @@ DEFAULT_BOUNDS = {
     "dc": (1.0, 2000.0),
 }
 
+
 SCREEN_WIDTH_CM = 34.5
+
+
 SCREEN_HEIGHT_CM = 19.5
+
+
 SCREEN_WIDTH_PX = 1920.0
+
+
 SCREEN_HEIGHT_PX = 1080.0
+
+
 VIEWING_DISTANCE_CM = 57.0
 
 
@@ -374,158 +375,3 @@ def optimize_free_parameters(data, init_params=None, bounds=None, method="L-BFGS
         "n_observations": int(len(data["timestamp"])),
         "n_trials_with_records": int(pd.Series(data["trial_number"]).nunique()),
     }
-
-
-def resolve_pipeline_inputs(
-    eyetrack_path=None,
-    records_path=None,
-    subject_dir=None,
-    task_name="T6_EmotionalObservationTask",
-    cleaned_output_dir=None,
-):
-    cleaned_output_dir = (
-        Path(cleaned_output_dir).expanduser().resolve()
-        if cleaned_output_dir is not None
-        else None
-    )
-    if subject_dir is not None:
-        subject_dir = Path(subject_dir).expanduser().resolve()
-        cleaned = prepare_clean_raw_data(
-            subject_dir=subject_dir,
-            task_name=task_name,
-            output_dir=cleaned_output_dir,
-        )
-        return {
-            "eyetrack_path": Path(cleaned["formal_eyetrack_path"]),
-            "records_path": Path(cleaned["formal_records_path"]),
-            "subject_dir": subject_dir,
-            "task_name": task_name,
-            "selected_run_dir": cleaned["selected_run_dir"],
-            "input_mode": "auto_cleaned_subject_dir",
-            "subject_id": subject_dir.name,
-        }
-
-    if eyetrack_path is None and records_path is None:
-        raise ValueError("必须提供 eyetrack_path 和 records_path，或提供 subject_dir。")
-    if eyetrack_path is None or records_path is None:
-        raise ValueError("eyetrack_path 和 records_path 必须同时提供。")
-
-    eyetrack_path = Path(eyetrack_path).expanduser().resolve()
-    records_path = Path(records_path).expanduser().resolve()
-    if not eyetrack_path.is_file():
-        raise FileNotFoundError(f"眼动文件不存在: {eyetrack_path}")
-    if not records_path.is_file():
-        raise FileNotFoundError(f"记录文件不存在: {records_path}")
-
-    inferred_subject_dir = eyetrack_path.parent
-    if inferred_subject_dir.name == "raw_data":
-        selected_run_dir = str(inferred_subject_dir.parent)
-        inferred_subject_dir = inferred_subject_dir.parents[2]
-    else:
-        selected_run_dir = ""
-
-    return {
-        "eyetrack_path": eyetrack_path,
-        "records_path": records_path,
-        "subject_dir": inferred_subject_dir,
-        "task_name": task_name,
-        "selected_run_dir": selected_run_dir,
-        "input_mode": "direct_files",
-        "subject_id": inferred_subject_dir.name,
-    }
-
-
-def run_pipeline(
-    eyetrack_path=None,
-    records_path=None,
-    subject_dir=None,
-    task_name="T6_EmotionalObservationTask",
-    cleaned_output_dir=None,
-    init_params=None,
-    bounds=None,
-    timestamp_unit_scale=1e6,
-):
-    resolved_inputs = resolve_pipeline_inputs(
-        eyetrack_path=eyetrack_path,
-        records_path=records_path,
-        subject_dir=subject_dir,
-        task_name=task_name,
-        cleaned_output_dir=cleaned_output_dir,
-    )
-
-    eyetrack_path = resolved_inputs["eyetrack_path"]
-    records_path = resolved_inputs["records_path"]
-    eyetrack_df = pd.read_csv(eyetrack_path, encoding="utf-8-sig")
-    records_df = pd.read_csv(records_path, encoding="utf-8-sig")
-
-    base_df, detected_trials = build_base_frame(eyetrack_df)
-    annotated_df = annotate_spatial_and_emotion(base_df, records_df)
-    prepared_df, model_data = prepare_model_data(
-        annotated_df, timestamp_unit_scale=timestamp_unit_scale
-    )
-    optimization_result = optimize_free_parameters(
-        model_data,
-        init_params=init_params,
-        bounds=bounds,
-    )
-
-    best_params = optimization_result["best_params"]
-    return {
-        "input_mode": resolved_inputs["input_mode"],
-        "subject_id": resolved_inputs["subject_id"],
-        "task_name": resolved_inputs["task_name"],
-        "selected_run_dir": resolved_inputs["selected_run_dir"],
-        "Pm1_positive": optimization_result["Pm1_positive"],
-        "Pm2_negative": optimization_result["Pm2_negative"],
-        "Pm3_neutral": optimization_result["Pm3_neutral"],
-        "Tmax1": best_params["Tmax1"],
-        "Tmax2": best_params["Tmax2"],
-        "Tmax3": best_params["Tmax3"],
-        "dc": float(px_to_visual_angle_deg(best_params["dc"])),
-    }
-
-
-def main():
-    core_dir = Path(__file__).resolve().parent
-    sample_subject_dir = core_dir / "data_example" / "TEST001_demo_female"
-    task_name = "T6_EmotionalObservationTask"
-    output_dir = core_dir / "result_example"
-
-    parts = sample_subject_dir.name.split("_")
-    name = parts[1]
-    gender = parts[2]
-
-    result = run_pipeline(
-        subject_dir=sample_subject_dir,
-        task_name=task_name,
-    )
-
-    thresholds = load_thresholds(ROOT_DIR / "devide_rule")
-    category = classify(
-        result["Pm2_negative"],
-        result["Tmax2"],
-        float(thresholds["pm2_cutoff_q75"]),
-        float(thresholds["tmax2_cutoff_median"]),
-    )
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_file = output_dir / f"{name}_{timestamp}.csv"
-    row = {
-        "name": name,
-        "gender": gender,
-        "Pm1_positive": result["Pm1_positive"],
-        "Pm2_negative": result["Pm2_negative"],
-        "Pm3_neutral": result["Pm3_neutral"],
-        "Tmax1": result["Tmax1"],
-        "Tmax2": result["Tmax2"],
-        "Tmax3": result["Tmax3"],
-        "dc": result["dc"],
-        "类别": category,
-    }
-    pd.DataFrame([row]).to_csv(output_file, index=False, encoding="utf-8-sig")
-    print(output_file)
-
-
-if __name__ == "__main__":
-    main()

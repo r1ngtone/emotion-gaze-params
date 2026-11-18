@@ -13,10 +13,11 @@ model-score advantage rather than a cross-task likelihood difference.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import re
 import json
 import math
 import os
-import shutil
 import sys
 import time
 import traceback
@@ -24,9 +25,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
-
-os.environ.setdefault("MPLCONFIGDIR", "/private/tmp/mpl-t5t6-timeblock")
-os.environ.setdefault("XDG_CACHE_HOME", "/private/tmp/cache-t5t6-timeblock")
 
 import matplotlib
 
@@ -38,21 +36,16 @@ from numba import njit  # noqa: E402
 from scipy.optimize import minimize  # noqa: E402
 
 
-SCRIPT_PATH = Path(__file__).resolve()
-OUTPUT_DIR = SCRIPT_PATH.parent
-REPO_ROOT = SCRIPT_PATH.parents[6]
-T5_ROOT = REPO_ROOT / "single_pic" / "单图" / "t5_divide"
-T6_ROOT = REPO_ROOT / "multipic_eye" / "多图" / "t6_devide"
-for path in (T5_ROOT / "src", T5_ROOT, T6_ROOT):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+REPOSITORY = Path(__file__).resolve().parents[1]
+if str(REPOSITORY) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY))
 
-from t5_memory.model import (  # noqa: E402
+from fit.t5_memory.model import (
     load_a5_dataframe,
     loglik_picture_only as official_t5_score,
 )
-from t5_memory.pipeline import run_memory_pipeline_from_dataframes  # noqa: E402
-from corecode.pipeline import (  # noqa: E402
+from fit.t5_memory.pipeline import run_memory_pipeline_from_dataframes
+from fit.t6.pipeline import (
     annotate_spatial_and_emotion,
     build_base_frame,
     compute_log_likelihood as score_t6,
@@ -62,11 +55,6 @@ from corecode.pipeline import (  # noqa: E402
 
 
 TASK_ID = "T20260727-001-t5-t6-likelihood-permutation"
-INPUT_MANIFEST = (
-    REPO_ROOT
-    / "t5t6 联合数据分析/260616/data/20260624_t5_t6_118_rerun/input_manifest.csv"
-)
-DEFAULT_CHECKPOINT_DIR = Path("/private/tmp/t5t6_timeblock_permutation_checkpoints")
 TASKS = ("T5", "T6")
 EMOTIONS_T5 = ("positive", "negative", "neutral", "complex")
 FOLDS = 4
@@ -81,8 +69,6 @@ T5_RESAMPLE_RATIO = 0.07
 @dataclass(frozen=True)
 class SubjectInput:
     subject_id: str
-    name: str
-    gender: str
     t5_eyetrack: str
     t5_records: str
     t6_eyetrack: str
@@ -91,9 +77,9 @@ class SubjectInput:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, default=INPUT_MANIFEST)
-    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
-    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--checkpoint-dir", type=Path, help="Defaults to OUTPUT_DIR/checkpoints")
     parser.add_argument("--permutations", type=int, default=FORMAL_PERMUTATIONS)
     parser.add_argument("--max-subjects", type=int, default=None)
     parser.add_argument("--workers", type=int, default=max(1, min(8, os.cpu_count() or 1)))
@@ -102,7 +88,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-only", action="store_true")
     parser.add_argument("--shard-count", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
-    parser.add_argument("--keep-checkpoints", action="store_true")
     return parser.parse_args()
 
 
@@ -116,28 +101,29 @@ def stable_seed(base: int, subject_id: str, task: str, fold: int) -> int:
 
 def read_subjects(manifest_path: Path, max_subjects: int | None) -> list[SubjectInput]:
     frame = pd.read_csv(manifest_path, dtype={"subject_id": str})
-    required = {"subject_id", "name", "gender", "task_type", "eyetrack_path", "records_path", "status"}
+    required = {"subject_id", "task_type", "eyetrack_path", "records_path", "status"}
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Manifest missing columns: {sorted(missing)}")
     frame = frame.loc[frame["status"].eq("success")].copy()
     rows: list[SubjectInput] = []
     for subject_id, group in frame.groupby("subject_id", sort=True):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", subject_id):
+            raise ValueError("Use a non-identifying subject ID containing only letters, digits, dots, underscores or hyphens")
+        if group["task_type"].duplicated().any():
+            raise ValueError(f"Duplicate tasks for subject {subject_id}")
         task_map = {str(row.task_type): row for row in group.itertuples(index=False)}
         if set(task_map) != set(TASKS):
             continue
         t5 = task_map["T5"]
         t6 = task_map["T6"]
-        paths = [t5.eyetrack_path, t5.records_path, t6.eyetrack_path, t6.records_path]
-        if not all(Path(str(path)).is_file() for path in paths):
+        paths = [
+            (manifest_path.parent / str(path)).resolve()
+            for path in (t5.eyetrack_path, t5.records_path, t6.eyetrack_path, t6.records_path)
+        ]
+        if not all(path.is_file() for path in paths):
             raise FileNotFoundError(f"Missing input for subject {subject_id}: {paths}")
-        rows.append(
-            SubjectInput(
-                subject_id=str(subject_id), name=str(t5.name), gender=str(t5.gender),
-                t5_eyetrack=str(t5.eyetrack_path), t5_records=str(t5.records_path),
-                t6_eyetrack=str(t6.eyetrack_path), t6_records=str(t6.records_path),
-            )
-        )
+        rows.append(SubjectInput(str(subject_id), *(str(path) for path in paths)))
     if max_subjects is not None:
         rows = rows[:max_subjects]
     return rows
@@ -631,8 +617,6 @@ def run_subject(subject: SubjectInput, permutations: int, seed: int) -> dict[str
         t5_folds, t5_summary = fit_and_score_t5(t5_data, subject.subject_id, permutations, seed)
         t6_data = t6_data_from_paths(subject.t6_eyetrack, subject.t6_records)
         t6_folds, t6_summary = fit_and_score_t6(t6_data, subject.subject_id, permutations, seed)
-        for row in (t5_summary, t6_summary):
-            row.update({"name": subject.name, "gender": subject.gender})
         return {
             "status": "success", "subject_id": subject.subject_id,
             "folds": [*t5_folds, *t6_folds], "subjects": [t5_summary, t6_summary],
@@ -778,7 +762,7 @@ def save_figures(subjects: pd.DataFrame, summary: pd.DataFrame, output_dir: Path
     )
     for suffix in ("png", "pdf"):
         fig.savefig(
-            output_dir / f"Figure_T5_T6_timeblock_permutation_summary_N118.{suffix}",
+            output_dir / f"Figure_T5_T6_timeblock_permutation_summary.{suffix}",
             bbox_inches="tight", facecolor="white",
         )
     plt.close(fig)
@@ -939,15 +923,61 @@ def final_qa(subjects: pd.DataFrame, folds: pd.DataFrame, failures: pd.DataFrame
         raise ValueError("Task-specific participant counts do not match")
 
 
+def bind_checkpoint_directory(args: argparse.Namespace, subjects: list[SubjectInput]) -> None:
+    """Keep checkpoints tied to the selected files and scoring settings."""
+    settings = {
+        "permutations": args.permutations, "seed": args.seed, "folds": FOLDS,
+        "block_ms": BLOCK_MS, "t5_resample_ratio": T5_RESAMPLE_RATIO,
+    }
+    code_files = [
+        Path(__file__),
+        REPOSITORY / "fit/t5_memory/model.py",
+        REPOSITORY / "fit/t5_memory/pipeline.py",
+        REPOSITORY / "fit/t6/pipeline.py",
+    ]
+    settings["code"] = [hashlib.sha256(path.read_bytes()).hexdigest() for path in code_files]
+    settings["subjects"] = {}
+    for subject in subjects:
+        files = (subject.t5_eyetrack, subject.t5_records, subject.t6_eyetrack, subject.t6_records)
+        signatures = []
+        for file in files:
+            path = Path(file)
+            metadata = path.stat()
+            signatures.append([str(path), metadata.st_size, metadata.st_mtime_ns])
+        settings["subjects"][subject.subject_id] = signatures
+    fingerprint = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+    contract = args.checkpoint_dir / "run-fingerprint.txt"
+    if contract.exists():
+        if contract.read_text(encoding="utf-8").strip() != fingerprint:
+            raise ValueError("Checkpoint inputs or settings changed. Use a fresh checkpoint directory.")
+        return
+    if args.analysis_only or (args.checkpoint_dir.exists() and any(args.checkpoint_dir.iterdir())):
+        raise ValueError("Checkpoint directory does not contain a matching run fingerprint")
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    with contract.open("x", encoding="utf-8") as handle:
+        handle.write(fingerprint + "\n")
+
+
 def main() -> None:
     args = parse_args()
-    if args.permutations < 1:
-        raise ValueError("permutations must be positive")
+    if args.permutations < 2:
+        raise ValueError("at least two permutations are required for a sample standard deviation")
+    if args.workers < 1 or (args.max_subjects is not None and args.max_subjects < 1):
+        raise ValueError("workers and max-subjects must be positive")
+    if args.checkpoint_dir is None:
+        args.checkpoint_dir = args.output_dir / "checkpoints"
     if args.shard_count < 1 or not 0 <= args.shard_index < args.shard_count:
         raise ValueError("shard-index must be in [0, shard-count)")
     subjects = read_subjects(args.manifest, args.max_subjects)
+    if not subjects:
+        raise ValueError("No paired T5/T6 inputs were selected")
+    bind_checkpoint_directory(args, subjects)
     if args.shard_count > 1:
         subjects = subjects[args.shard_index::args.shard_count]
+    if not subjects:
+        raise ValueError("No subjects were selected for this shard")
+    if len(subjects) < 2 and not args.checkpoint_only:
+        raise ValueError("Group summaries require at least two paired subjects")
     if not args.analysis_only:
         run_jobs(subjects, args)
     if args.checkpoint_only:
@@ -957,12 +987,12 @@ def main() -> None:
     summary = summarize(subject_frame, args.seed)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     subject_frame.sort_values(["task", "subject_id"]).to_csv(
-        args.output_dir / "T5_T6_timeblock_permutation_subject_N118.csv", index=False, encoding="utf-8-sig",
+        args.output_dir / "T5_T6_timeblock_permutation_subject.csv", index=False, encoding="utf-8-sig",
     )
     fold_frame.sort_values(["task", "subject_id", "fold"]).to_csv(
-        args.output_dir / "T5_T6_timeblock_permutation_folds_N118.csv", index=False, encoding="utf-8-sig",
+        args.output_dir / "T5_T6_timeblock_permutation_folds.csv", index=False, encoding="utf-8-sig",
     )
-    summary.to_csv(args.output_dir / "T5_T6_timeblock_permutation_summary_N118.csv", index=False, encoding="utf-8-sig")
+    summary.to_csv(args.output_dir / "T5_T6_timeblock_permutation_summary.csv", index=False, encoding="utf-8-sig")
     save_figures(subject_frame, summary, args.output_dir)
     write_reports(subject_frame, fold_frame, summary, failures, args.output_dir, args.permutations)
     contract = {
@@ -975,8 +1005,6 @@ def main() -> None:
     (args.output_dir / "analysis-contract.json").write_text(
         json.dumps(contract, ensure_ascii=False, indent=2), encoding="utf-8",
     )
-    if not args.keep_checkpoints:
-        shutil.rmtree(args.checkpoint_dir)
     print(summary.to_string(index=False), flush=True)
     print(f"output_dir={args.output_dir}", flush=True)
 

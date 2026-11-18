@@ -1,20 +1,13 @@
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
-ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from .clean_input import load_clean_t5_raw_data
+from .model import run_model_for_a5_df
+from .pipeline import run_memory_pipeline_from_dataframes
 
-from single_subject.clean_input import load_clean_t5_raw_data
-from t5_memory.model import run_model_for_a5_df
-from t5_memory.pipeline import run_memory_pipeline_from_dataframes
 
 TASK_DIRNAME = "T5_EmotionalOrientingTask"
 RAW_DIRNAME = "raw_data"

@@ -22,3 +22,7 @@ __pycache__/
 
 # Windows 元数据
 Thumbs.db
+
+# Local runtime and generated output
+.venv/
+out/
