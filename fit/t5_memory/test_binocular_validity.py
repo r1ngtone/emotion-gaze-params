@@ -1,18 +1,8 @@
-import importlib.util
-import sys
 import unittest
-from pathlib import Path
 
 import pandas as pd
 
-
-PIPELINE_PATH = Path(__file__).resolve().parents[1] / "src" / "t5_memory" / "pipeline.py"
-SPEC = importlib.util.spec_from_file_location("t5_memory_pipeline", PIPELINE_PATH)
-if SPEC is None or SPEC.loader is None:
-    raise ImportError(f"无法加载 T5 pipeline: {PIPELINE_PATH}")
-PIPELINE = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = PIPELINE
-SPEC.loader.exec_module(PIPELINE)
+from fit.t5_memory import pipeline as PIPELINE
 
 
 class BinocularValidityTests(unittest.TestCase):
